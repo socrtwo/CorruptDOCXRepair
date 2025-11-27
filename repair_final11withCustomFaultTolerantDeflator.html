@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DOCX Repair: Robust Merge (v9)</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <style>
+        :root { --bg: #121212; --panel: #1f1f1f; --text: #e0e0e0; --accent: #00e5ff; --ok: #76ff03; --del: #ff1744; --btn-bg: #333; }
+        body { font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); padding: 20px; display: flex; justify-content: center; }
+        .main { width: 100%; max-width: 900px; }
+        .card { background: var(--panel); border: 1px solid #333; border-radius: 8px; padding: 20px; margin-bottom: 15px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
+        h1 { margin-top: 0; color: var(--accent); }
+        p { color: #aaa; line-height: 1.5; }
+        button { background: var(--accent); color: #000; border: none; padding: 12px 24px; font-weight: bold; border-radius: 4px; cursor: pointer; transition: transform 0.1s; }
+        button:active { transform: scale(0.98); }
+        button:disabled { opacity: 0.5; cursor: not-allowed; background: #555; }
+        #log { height: 400px; overflow-y: auto; background: #000; border: 1px solid #333; padding: 10px; font-size: 12px; white-space: pre-wrap; font-family: 'Consolas', monospace; color: #ccc; }
+        .ok { color: var(--ok); } .del { color: var(--del); } .warn { color: #ffd740; }
+
+        /* Modal */
+        .modal-overlay { position: fixed; top:0; left:0; width:100%; height:100%; background: rgba(0,0,0,0.85); display: none; align-items: center; justify-content: center; z-index: 1000; }
+        .modal { background: #222; padding: 30px; border-radius: 12px; border: 1px solid #444; max-width: 650px; width: 90%; box-shadow: 0 20px 50px rgba(0,0,0,0.7); }
+        .modal h2 { color: var(--accent); margin-top: 0; border-bottom: 1px solid #444; padding-bottom: 10px; }
+        .strategy-btn { display: block; width: 100%; text-align: left; padding: 15px; margin: 10px 0; background: var(--btn-bg); border: 1px solid #444; color: #fff; cursor: pointer; border-radius: 6px; transition: 0.2s; }
+        .strategy-btn:hover { background: #444; border-color: var(--accent); }
+        .strategy-btn strong { display: block; font-size: 1.1em; margin-bottom: 4px; color: var(--accent); }
+        .strategy-btn span { font-size: 0.9em; color: #aaa; }
+        .file-info { background: #111; padding: 12px; margin-bottom: 20px; border-radius: 6px; border: 1px solid #333; font-family: 'Consolas', monospace; color: var(--ok); }
+    </style>
+</head>
+<body>
+
+<div class="main">
+    <div class="card">
+        <h1>DOCX Robust Merge Engine (v9)</h1>
+        <p>Advanced <strong>Duplicate Detection</strong>. Fixes nested XML errors that cause blank documents.</p>
+        <input type="file" id="fileInput" />
+        <div style="margin-top:20px">
+            <button id="btnRun" disabled>Run Repair</button>
+            <button id="btnDownload" style="display:none; background: var(--ok); color: #000;">Download Result</button>
+        </div>
+    </div>
+    <div id="log">Ready. Load a file to begin...</div>
+</div>
+
+<!-- STRATEGY MODAL -->
+<div id="modal" class="modal-overlay">
+    <div class="modal">
+        <h2>⚠️ Duplicate Documents Found</h2>
+        <p>This file contains multiple <code>document.xml</code> streams (concatenated files). Please choose a recovery strategy:</p>
+        <div id="fileInfo" class="file-info"></div>
+        
+        <button class="strategy-btn" onclick="resolveStrategy(1)">
+            <strong>1. Restore First Only</strong>
+            <span>Ignores duplicates. Restores the first document found.</span>
+        </button>
+        <button class="strategy-btn" onclick="resolveStrategy(2)">
+            <strong>2. Restore Largest Only</strong>
+            <span>Ignores duplicates. Restores the file with the most data.</span>
+        </button>
+        <button class="strategy-btn" onclick="resolveStrategy(3)">
+            <strong>3. Separate Files (Shared Styles)</strong>
+            <span>Creates two separate DOCX files. Both share the same styles/images.</span>
+        </button>
+        <button class="strategy-btn" onclick="resolveStrategy(4)">
+            <strong>4. Separate Files (Clean/Dummy)</strong>
+            <span>Creates two text-only DOCX files with all formatting stripped (safest).</span>
+        </button>
+        <button class="strategy-btn" onclick="resolveStrategy(5)">
+            <strong>5. Append & Merge</strong>
+            <span>Combines text from ALL copies into one long document with a yellow separator.</span>
+        </button>
+    </div>
+</div>
+
+<script>
+// --- DUMMY ASSETS ---
+const DUMMY = {
+    TYPES: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`,
+    RELS: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`,
+    DOC_RELS: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>`
+};
+
+// --- IMMORTAL INFLATER ---
+const ImmortalInflate = (function() {
+    class BitStream {
+        constructor(u8) { this.buf=u8; this.pos=0; this.bit=0; this.len=u8.length; }
+        read(n) {
+            let v=0;
+            for(let i=0;i<n;i++) {
+                if(this.pos>=this.len) return -1;
+                v |= ((this.buf[this.pos]>>>this.bit)&1)<<i;
+                this.bit++;
+                if(this.bit===8){this.bit=0;this.pos++;}
+            }
+            return v;
+        }
+        align() { if(this.bit!==0){this.bit=0;this.pos++;} }
+    }
+    const FIXED_LIT=new Uint8Array(288); for(let i=0;i<144;i++)FIXED_LIT[i]=8;for(let i=144;i<256;i++)FIXED_LIT[i]=9;for(let i=256;i<280;i++)FIXED_LIT[i]=7;for(let i=280;i<288;i++)FIXED_LIT[i]=8;
+    const FIXED_DIST=new Uint8Array(32); for(let i=0;i<32;i++)FIXED_DIST[i]=5;
+    const CLEN_ORDER=[16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15];
+    const LEN_BASE=[3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258];
+    const LEN_EXTRA=[0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0];
+    const DIST_BASE=[1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577];
+    const DIST_EXTRA=[0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13];
+
+    function buildTree(lengths){
+        const counts=new Int32Array(16), nextCode=new Int32Array(16);
+        let maxLen=0;
+        for(let i=0;i<lengths.length;i++){counts[lengths[i]]++; if(lengths[i]>maxLen)maxLen=lengths[i];}
+        if(maxLen===0)return null;
+        let code=0; counts[0]=0;
+        for(let i=1;i<=15;i++){ code=(code+counts[i-1])<<1; nextCode[i]=code; }
+        const map={};
+        for(let i=0;i<lengths.length;i++){
+            let len=lengths[i];
+            if(len!==0){ map[(len<<16)|nextCode[len]]=i; nextCode[len]++; }
+        }
+        return {map,maxLen};
+    }
+    function decodeSym(s,t){
+        let c=0;
+        for(let l=1;l<=t.maxLen;l++){
+            const b=s.read(1); if(b===-1)return -1;
+            c=(c<<1)|b;
+            const k=(l<<16)|c;
+            if(t.map[k]!==undefined)return t.map[k];
+        }
+        return -2;
+    }
+    return function inflate(u8){
+        const s=new BitStream(u8);
+        const out=[];
+        let bfinal=0;
+        let corrupted=false;
+        try{
+            while(!bfinal){
+                bfinal=s.read(1); const btype=s.read(2);
+                if(bfinal===-1||btype===-1) { corrupted=true; break; }
+                if(btype===0){
+                    s.align(); const len=s.read(16); const nlen=s.read(16);
+                    if(len===-1) { corrupted=true; break; }
+                    for(let i=0;i<len;i++) out.push(s.buf[s.pos++]||0);
+                }else if(btype===1||btype===2){
+                    let lt,dt;
+                    if(btype===1){ lt=buildTree(FIXED_LIT); dt=buildTree(FIXED_DIST); }
+                    else{
+                        const hl=s.read(5)+257, hd=s.read(5)+1, hc=s.read(4)+4;
+                        if(hl<257) { corrupted=true; break; }
+                        const cl=new Uint8Array(19);
+                        for(let i=0;i<hc;i++) cl[CLEN_ORDER[i]]=s.read(3);
+                        const ct=buildTree(cl); if(!ct) { corrupted=true; break; }
+                        const unpack=(count)=>{
+                            const r=[];
+                            while(r.length<count){
+                                const sy=decodeSym(s,ct);
+                                if(sy<0||sy>18)return null;
+                                if(sy<16)r.push(sy);
+                                else if(sy===16){ let c=3+s.read(2), p=r[r.length-1]; while(c--)r.push(p); }
+                                else if(sy===17){ let z=3+s.read(3); while(z--)r.push(0); }
+                                else if(sy===18){ let z=11+s.read(7); while(z--)r.push(0); }
+                            }
+                            return new Uint8Array(r);
+                        };
+                        const ll=unpack(hl), dl=unpack(hd);
+                        if(!ll||!dl) { corrupted=true; break; }
+                        lt=buildTree(ll); dt=buildTree(dl);
+                    }
+                    if(!lt||!dt) { corrupted=true; break; }
+                    while(true){
+                        const sym=decodeSym(s,lt);
+                        if(sym===-1||sym===-2) { corrupted=true; break; }
+                        if(sym===256)break;
+                        if(sym<256) out.push(sym);
+                        else{
+                            const lc=sym-257; if(lc>28) { corrupted=true; break; }
+                            const len=LEN_BASE[lc]+s.read(LEN_EXTRA[lc]);
+                            const dc=decodeSym(s,dt); if(dc<0) { corrupted=true; break; }
+                            const dist=DIST_BASE[dc]+s.read(DIST_EXTRA[dc]);
+                            if(dist>out.length){ corrupted=true; bfinal=1; break; } 
+                            let ptr=out.length-dist;
+                            for(let i=0;i<len;i++) out.push(out[ptr++]);
+                        }
+                    }
+                }else { corrupted=true; break; }
+            }
+        }catch(e){ corrupted=true; }
+        return { data: new Uint8Array(out), isCorrupt: corrupted };
+    };
+})();
+
+// --- APP LOGIC ---
+const logEl = document.getElementById('log');
+let fileBuf = null;
+let docCandidates = []; // Stores multiple document.xml versions
+let recoveredAssets = {}; // Stores non-document.xml files
+let resolveUserChoice = null; // For the Promise
+
+function log(msg, cls=''){
+    const d=document.createElement('div');
+    d.textContent=`[${new Date().toLocaleTimeString()}] ${msg}`;
+    if(cls) d.className=cls;
+    logEl.appendChild(d);
+    logEl.scrollTop=logEl.scrollHeight;
+}
+
+document.getElementById('fileInput').addEventListener('change', e=>{
+    const f=e.target.files[0];
+    if(!f)return;
+    const r=new FileReader();
+    r.onload=ev=>{ fileBuf=ev.target.result; document.getElementById('btnRun').disabled=false; log(`Loaded ${f.name} (${fileBuf.byteLength})`); };
+    r.readAsArrayBuffer(f);
+});
+
+document.getElementById('btnRun').addEventListener('click', async ()=>{
+    log("Starting Robust Merge Engine...", 'warn');
+    document.getElementById('btnRun').disabled=true;
+    
+    // Reset State
+    docCandidates = [];
+    recoveredAssets = {};
+    
+    const u8 = new Uint8Array(fileBuf);
+    const view = new DataView(fileBuf);
+    let offset = 0;
+    
+    // --- SCAN PHASE ---
+    while(offset < u8.length - 30) {
+        if(u8[offset]!==0x50 || u8[offset+1]!==0x4b || u8[offset+2]!==0x03 || u8[offset+3]!==0x04) { offset++; continue; }
+        
+        const meth = view.getUint16(offset+8, true);
+        const nl = view.getUint16(offset+26, true);
+        const el = view.getUint16(offset+28, true);
+        const name = new TextDecoder().decode(u8.subarray(offset+30, offset+30+nl));
+        
+        let dStart = offset+30+nl+el;
+        let next = u8.length;
+        for(let k=dStart; k<u8.length-4; k++){
+            if(u8[k]===0x50 && u8[k+1]===0x4b && (u8[k+2]===0x01 || u8[k+2]===0x03 || u8[k+2]===0x05)){ next=k; break; }
+        }
+        
+        const rawChunk = u8.subarray(dStart, next);
+        let finalData = null;
+        let isCorrupt = false;
+
+        if(meth === 0) {
+            finalData = rawChunk;
+        } else if (meth === 8) {
+            let bestRes = { data: new Uint8Array(0), isCorrupt: true };
+            let bestScore = 0;
+            for(let shift=0; shift<48; shift++) {
+                if(shift >= rawChunk.length) break;
+                const attemptRaw = rawChunk.subarray(shift);
+                const res = ImmortalInflate(attemptRaw);
+                if(res.data.length > 0) {
+                    const score = rateQuality(res.data, name);
+                    if(score > bestScore) { bestScore = score; bestRes = res; if(score > 1000) break; }
+                }
+            }
+            finalData = bestRes.data;
+            isCorrupt = bestRes.isCorrupt;
+        }
+        
+        if(finalData && finalData.length > 0) {
+            // Repair XML
+            if(name.endsWith('.xml') || name.endsWith('.rels')) {
+                let s = new TextDecoder().decode(finalData);
+                s = healXMLStrict(s);
+                finalData = new TextEncoder().encode(s);
+            }
+
+            // Classify
+            if (name.endsWith('word/document.xml')) {
+                log(`Found document.xml version (${finalData.length} bytes)`, 'warn');
+                docCandidates.push(finalData);
+            } else {
+                // Non-essential filter
+                const isEssential = name.includes('.rels') || name.includes('[Content_Types]') || name.includes('header') || name.includes('footer');
+                if (isCorrupt && !isEssential) {
+                    log(`DROPPED corrupt asset: ${name}`, 'del');
+                } else {
+                    recoveredAssets[name] = finalData;
+                    log(`Kept asset: ${name}`, 'ok');
+                }
+            }
+        }
+        offset = next;
+    }
+
+    // --- DECISION PHASE ---
+    let finalBlobs = []; // Array of {name, blob} for download
+    let zipName = "repaired.docx";
+
+    if (docCandidates.length === 0) {
+        log("CRITICAL: No document.xml found.", 'del');
+        return;
+    } else if (docCandidates.length === 1) {
+        log("Single document found. Standard repair.", 'ok');
+        finalBlobs = [ { name: "repaired.docx", blob: await buildDocx(docCandidates[0], recoveredAssets) } ];
+    } else {
+        // MULTIPLE DOCS FOUND - TRIGGER DIALOG
+        log(`CONFLICT: ${docCandidates.length} document.xml files found. Asking user...`, 'warn');
+        const choice = await promptUser(docCandidates);
+        
+        if (choice === 1) {
+            // First only
+            finalBlobs = [ { name: "repaired_first.docx", blob: await buildDocx(docCandidates[0], recoveredAssets) } ];
+        } else if (choice === 2) {
+            // Largest only
+            const sorted = docCandidates.sort((a,b) => b.length - a.length);
+            finalBlobs = [ { name: "repaired_largest.docx", blob: await buildDocx(sorted[0], recoveredAssets) } ];
+        } else if (choice === 3) {
+            // Two files, shared assets
+            zipName = "repaired_bundle.zip";
+            const b1 = await buildDocx(docCandidates[0], recoveredAssets);
+            const b2 = await buildDocx(docCandidates[1], recoveredAssets);
+            finalBlobs = [ {name:"doc_v1.docx", blob:b1}, {name:"doc_v2.docx", blob:b2} ];
+        } else if (choice === 4) {
+            // Two files, DUMMY assets
+            zipName = "repaired_clean_bundle.zip";
+            const b1 = await buildDocx(docCandidates[0], null); // null triggers dummy
+            const b2 = await buildDocx(docCandidates[1], null);
+            finalBlobs = [ {name:"clean_v1.docx", blob:b1}, {name:"clean_v2.docx", blob:b2} ];
+        } else if (choice === 5) {
+            // Merge
+            const merged = mergeDocuments(docCandidates[0], docCandidates[1]);
+            finalBlobs = [ { name: "repaired_merged.docx", blob: await buildDocx(merged, recoveredAssets) } ];
+        }
+    }
+
+    // --- DOWNLOAD PHASE ---
+    const dlBtn = document.getElementById('btnDownload');
+    let finalUrl;
+    
+    if (finalBlobs.length === 1) {
+        // Single DOCX
+        finalUrl = URL.createObjectURL(finalBlobs[0].blob);
+        dlBtn.onclick = () => { download(finalUrl, finalBlobs[0].name); };
+        dlBtn.innerText = "Download DOCX";
+    } else {
+        // Bundle into ZIP
+        const bundle = new JSZip();
+        finalBlobs.forEach(f => bundle.file(f.name, f.blob));
+        const bundleBlob = await bundle.generateAsync({type:"blob"});
+        finalUrl = URL.createObjectURL(bundleBlob);
+        dlBtn.onclick = () => { download(finalUrl, zipName); };
+        dlBtn.innerText = "Download Bundle ZIP";
+    }
+    
+    dlBtn.style.display = 'inline-block';
+    log("Process Complete.", 'ok');
+});
+
+// --- HELPERS ---
+
+function promptUser(candidates) {
+    return new Promise(resolve => {
+        const m = document.getElementById('modal');
+        const info = document.getElementById('fileInfo');
+        info.innerHTML = candidates.map((c, i) => `<div>Doc #${i+1}: ${(c.length/1024).toFixed(2)} KB</div>`).join('');
+        m.style.display = 'flex';
+        // Global resolve
+        window.resolveStrategy = (n) => {
+            m.style.display = 'none';
+            resolve(n);
+        };
+    });
+}
+
+async function buildDocx(docXmlBytes, assets) {
+    const zip = new JSZip();
+    
+    if (assets) {
+        // Use recovered assets
+        for (let [n, d] of Object.entries(assets)) zip.file(n, d);
+        zip.file("word/document.xml", docXmlBytes);
+    } else {
+        // Use DUMMY assets (Strategy 4)
+        zip.file("[Content_Types].xml", DUMMY.TYPES);
+        zip.file("_rels/.rels", DUMMY.RELS);
+        zip.file("word/_rels/document.xml.rels", DUMMY.DOC_RELS);
+        zip.file("word/document.xml", docXmlBytes);
+    }
+    
+    return await zip.generateAsync({type:"blob", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"});
+}
+
+// --- ROBUST MERGE LOGIC (Fixes the blank document issue) ---
+function mergeDocuments(d1, d2) {
+    const dec = new TextDecoder();
+    const enc = new TextEncoder();
+    const s1 = dec.decode(d1);
+    const s2 = dec.decode(d2);
+    
+    // Aggressive Body Extractor
+    // Finds content inside <w:body> OR falls back to stripping wrappers
+    // CRITICALLY: Removes <w:body> tags from the result to prevent nesting
+    const extractBody = (xml) => {
+        // 1. Try Regex to capture content between body tags (namespace agnostic)
+        // Capture everything between <*:body ...> and </*:body>
+        const bodyRegex = /<[a-zA-Z0-9]*:?body[^>]*>(.*?)<\/[a-zA-Z0-9]*:?body>/s; 
+        const m = xml.match(bodyRegex);
+        
+        let content = "";
+        if (m && m[1]) {
+            content = m[1];
+        } else {
+            // 2. Fallback: Strip document wrappers and assume fragment
+            let s = xml;
+            s = s.replace(/<\?xml.*?>/gi, "");
+            s = s.replace(/<[a-zA-Z0-9]*:?document[^>]*>/gi, "");
+            s = s.replace(/<\/[a-zA-Z0-9]*:?document>/gi, "");
+            
+            // SAFETY: Strip body tags if regex failed but they exist
+            s = s.replace(/<[a-zA-Z0-9]*:?body[^>]*>/gi, "");
+            s = s.replace(/<\/[a-zA-Z0-9]*:?body>/gi, "");
+            content = s;
+        }
+        return content;
+    };
+    
+    const body1 = extractBody(s1);
+    let body2 = extractBody(s2);
+    
+    // Check if body2 is empty and warn
+    if (!body2 || body2.trim().length === 0) {
+        body2 = `<w:p><w:r><w:rPr><w:b/><w:color w:val="FF0000"/></w:rPr><w:t>ERROR: Document 2 content could not be extracted or was empty.</w:t></w:r></w:p>`;
+    }
+    
+    // Extensive Namespace Header
+    const namespaces = `xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:w10="urn:schemas-microsoft-com:office:word" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"`;
+
+    // Separator: Yellow Highlight, Red Text, All Caps, Bold
+    const separator = `<w:p><w:r><w:rPr><w:b/><w:color w:val="FF0000"/><w:highlight w:val="yellow"/><w:sz w:val="36"/></w:rPr><w:t>*** MERGE POINT: CONTENT FROM SECOND DOCUMENT FOLLOWS ***</w:t></w:r></w:p>`;
+
+    const merged = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    <w:document ${namespaces}>
+    <w:body>
+        ${body1}
+        ${separator}
+        ${body2}
+    </w:body>
+    </w:document>`;
+    
+    return enc.encode(merged);
+}
+
+function download(url, name) {
+    const a = document.createElement('a');
+    a.href = url; a.download = name; a.click();
+}
+
+function rateQuality(u8, name) {
+    let valid = 0;
+    for(let i=0; i<Math.min(u8.length, 500); i++) {
+        if((u8[i]>=32 && u8[i]<=126) || u8[i]===10 || u8[i]===13) valid++;
+    }
+    if(name.endsWith('.xml')) {
+        let hasBracket = false;
+        for(let i=0; i<Math.min(u8.length, 100); i++) if(u8[i] === 60) hasBracket=true;
+        if(hasBracket) valid += 500;
+    }
+    return valid;
+}
+
+function healXMLStrict(xml) {
+    xml = xml.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
+    const validStart = xml.search(/<\?xml|<[a-zA-Z0-9]+:/);
+    if(validStart > -1) xml = xml.substring(validStart);
+    else { const f = xml.indexOf('<'); if(f>-1) xml=xml.substring(f); }
+
+    let output = '';
+    let inTag = false;
+    let inQuote = false;
+    let quoteChar = null;
+    for (let i = 0; i < xml.length; i++) {
+        const c = xml[i];
+        const next = xml[i+1] || '';
+        if (!inTag) {
+            if (c === '<') { if (/[a-zA-Z0-9_:\/?]/.test(next)) { inTag = true; output += c; } else { output += '&lt;'; } } 
+            else if (c === '>') { output += '&gt;'; } 
+            else { output += c; }
+        } else {
+            if (inQuote) { if (c === quoteChar) { inQuote = false; quoteChar = null; } output += c; } 
+            else {
+                if (c === '"' || c === "'") { inQuote = true; quoteChar = c; output += c; } 
+                else if (c === '>') { inTag = false; output += c; } 
+                else if (c === '<') { output += '>'; inTag = false; i--; } 
+                else { output += c; }
+            }
+        }
+    }
+    if (inQuote) output += quoteChar;
+    if (inTag) output += '>';
+    const stack = [];
+    const re = /<\/?([a-zA-Z0-9_:\-]+)[^>]*(\/?)>/g;
+    let match;
+    while((match = re.exec(output)) !== null) {
+        const tag = match[1];
+        const full = match[0];
+        const isClose = full.startsWith('</');
+        const isSelf = full.endsWith('/>') || match[2] === '/';
+        if(isClose) { if(stack.length && stack[stack.length-1] === tag) stack.pop(); } 
+        else if (!isSelf && !full.startsWith('<?')) { stack.push(tag); }
+    }
+    while(stack.length) output += `</${stack.pop()}>`;
+    return output;
+}
+</script>
+</body>
+</html>
