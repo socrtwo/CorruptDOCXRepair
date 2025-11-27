@@ -1,0 +1,2 @@
+This is the 11th version of a file that works, at least on some files, as long as you have a partial word/document.xml. The original sample file I was successful with oddly no longer opens in Word 365, so they are possible adding further security guardrails to Word. Anyway it might work for your file so give it a try. Use Google Chrome or Microsoft Edge to try to make it work.
+The way this program works is it repairs the zip and then uses a custom zip deflator that impressively Gemini 3 Pro came up with. It doesn't use the ordinary JavaScript deflators.
