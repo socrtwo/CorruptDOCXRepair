@@ -1,3 +1,8 @@
+<!--PAGES_LINK_BANNER-->
+> 🌐 **Live page:** [https://socrtwo.github.io/CorruptDOCXRepair/](https://socrtwo.github.io/CorruptDOCXRepair/)  
+> 📦 **Releases:** [github.com/socrtwo/CorruptDOCXRepair/releases](https://github.com/socrtwo/CorruptDOCXRepair/releases)
+<!--/PAGES_LINK_BANNER-->
+
 <p>To repair corrupt DOCX files, download the HTML script, which is the one code file in this project. Open it in a browser, then load the file. Press the repair button, and then download the repaired file. If word won't open, try LibreOffice Writer instead. It's better at opening the imperfect repaired files. If you don't succeed with that try one of my many Sourceforge programs that repair corrupt Word files, https://sourceforge.net/u/socrtwo22/profile.</p><p>
 This is the 11th version of a file that works, at least on some files, as long as you have a partial word/document.xml. The original sample file I was successful with oddly no longer opens in Word 365, so they are possible adding further security guardrails to Word. Anyway it might work for your file so give it a try. Use Google Chrome or Microsoft Edge to try to make it work, although if you only trust Opera, Vivaldi etc., it might work in those too.</p><p>
 The way this program works is it repairs the zip and then uses a custom zip deflator that impressively Gemini 3 Pro came up with. It doesn't use the ordinary JavaScript deflators.</p><p>
