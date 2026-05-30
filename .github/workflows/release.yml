@@ -1,0 +1,60 @@
+name: Release (multi-platform PWA)
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  APP_NAME: corruptdocxrepair
+  WEB_DIR: web
+
+jobs:
+  release:
+    name: Package & publish all platforms
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build per-platform install bundles
+        run: |
+          set -euo pipefail
+          if [ ! -d "$WEB_DIR" ]; then
+            echo "::error::WEB_DIR '$WEB_DIR' not found" >&2; exit 1
+          fi
+          mkdir -p dist
+
+          # This is a static, install-anywhere web app (PWA). Every platform
+          # ships the same web bundle plus a short platform-specific INSTALL note.
+          make_bundle () {  # $1 = platform slug, $2 = install instructions
+            local plat="$1" note="$2" stage
+            stage="stage/$plat"
+            rm -rf "$stage"; mkdir -p "$stage"
+            cp -r "$WEB_DIR"/. "$stage/"
+            [ -f fixdocx.html ] && cp fixdocx.html "$stage/"
+            printf '%s\n' "$note" > "$stage/INSTALL.txt"
+            ( cd "$stage" && zip -r "$GITHUB_WORKSPACE/dist/${APP_NAME}-${plat}.zip" . )
+          }
+
+          make_bundle web      "Open index.html in any modern browser, or host the folder. Install as a PWA from the address bar."
+          make_bundle windows  "Windows: open index.html in Edge/Chrome, then Install (PWA) from the address bar for a desktop app."
+          make_bundle macos    "macOS: open index.html in Chrome/Edge, then Install (PWA), or in Safari add to Dock."
+          make_bundle linux    "Linux: open index.html in Chrome/Chromium, then Install (PWA) from the address bar."
+          make_bundle chromeos "ChromeOS: open the app in Chrome and choose Install from the address bar."
+          make_bundle android  "Android: open the live app in Chrome, then Menu -> Add to Home screen / Install app."
+          make_bundle ios      "iOS / iPadOS: open the live app in Safari, then Share -> Add to Home Screen."
+
+          ( cd dist && sha256sum *.zip > SHA256SUMS )
+          echo "Built bundles:"; ls -lh dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/SHA256SUMS
+          generate_release_notes: true
+          fail_on_unmatched_files: true
